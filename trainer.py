@@ -1,11 +1,14 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import transforms
+from torchvision.utils import save_image, make_grid
 from PIL import Image
 import numpy as np
 from glob import glob
+from datetime import datetime
 
 # Autoencoder for getting images into latent space
 class Autoencoder(nn.Module):
@@ -111,6 +114,19 @@ class UNet(nn.Module):
 
         return self.final(u3)
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from torchvision import transforms
+from torchvision.utils import save_image, make_grid
+from PIL import Image
+import numpy as np
+import os
+from datetime import datetime
+
+# [Previous Autoencoder and UNet classes remain the same]
+
 class DiffusionTrainer:
     def __init__(self, autoencoder, unet, device='cuda'):
         self.device = device
@@ -125,8 +141,23 @@ class DiffusionTrainer:
         self.alphas = 1 - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
 
+        # Precalculate diffusion parameters
+        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - self.alphas_cumprod)
+
+        # Posterior variance calculation (beta_tilde)
+        # For t > 0, calculate posterior variance β_t~
+        self.posterior_variance = self.betas * (1. - self.alphas_cumprod[:-1]) / (1. - self.alphas_cumprod[1:])
+        # For t = 0, append the minimum beta value
+        self.posterior_variance = torch.cat([self.posterior_variance, torch.tensor([self.beta_end], device=device)])
+
+        # Add assertions to catch dimension mismatches
+        assert self.betas.shape == (self.num_timesteps,), f"Expected betas shape {self.num_timesteps}, got {self.betas.shape}"
+        assert self.alphas_cumprod.shape == (self.num_timesteps,), f"Expected alphas_cumprod shape {self.num_timesteps}, got {self.alphas_cumprod.shape}"
+        assert self.posterior_variance.shape == (self.num_timesteps,), f"Expected posterior_variance shape {self.num_timesteps}, got {self.posterior_variance.shape}"
+
     def get_noise_schedule(self, t):
-        return torch.sqrt(self.alphas_cumprod[t]), torch.sqrt(1 - self.alphas_cumprod[t])
+        return self.sqrt_alphas_cumprod[t], self.sqrt_one_minus_alphas_cumprod[t]
 
     def add_noise(self, x, t):
         alpha_t, sigma_t = self.get_noise_schedule(t)
@@ -160,7 +191,58 @@ class DiffusionTrainer:
 
         return loss.item()
 
-# Custom dataset class for your images
+    @torch.no_grad()
+    def sample(self, batch_size=1, progressive=False):
+        """
+        Generate samples from noise using the trained model.
+        If progressive=True, return intermediate steps for visualization.
+        """
+        self.unet.eval()
+
+        # Start from random noise
+        shape = (batch_size, 4, 64, 64)  # 4 is latent dimension
+        img = torch.randn(shape, device=self.device)
+
+        # Store intermediate steps if progressive
+        intermediate_images = []
+        timesteps_to_save = set(range(0, self.num_timesteps, self.num_timesteps // 10))
+
+        # Reverse diffusion process
+        for i in reversed(range(0, self.num_timesteps)):
+            # Progress indicator
+            if i % 100 == 0:
+                print(f'Sampling timestep {i:4d}', end='\r')
+
+            # Get network prediction
+            t = torch.full((batch_size,), i, device=self.device, dtype=torch.long)
+            predicted_noise = self.unet(img, t.float() / self.num_timesteps)
+
+            alpha = self.alphas[i]
+            alpha_hat = self.alphas_cumprod[i]
+            beta = self.betas[i]
+
+            if i > 0:
+                noise = torch.randn_like(img)
+            else:
+                noise = torch.zeros_like(img)
+
+            img = (1 / torch.sqrt(alpha)) * (img - ((1 - alpha) / torch.sqrt(1 - alpha_hat)) * predicted_noise) + torch.sqrt(beta) * noise
+
+            # Save intermediate result
+            if progressive and i in timesteps_to_save:
+                # Decode to image space
+                with torch.no_grad():
+                    decoded = self.autoencoder.decode(img)
+                intermediate_images.append(decoded)
+
+        # Decode final latent to image
+        with torch.no_grad():
+            final_img = self.autoencoder.decode(img)
+
+        if progressive:
+            return final_img, intermediate_images
+        return final_img
+
 class ImageDataset(torch.utils.data.Dataset):
     def __init__(self, image_paths, image_size=256):
         self.image_paths = image_paths
@@ -178,8 +260,46 @@ class ImageDataset(torch.utils.data.Dataset):
         img = Image.open(self.image_paths[idx]).convert('RGB')
         return self.transform(img)
 
-# Training function
-def train(image_paths, num_epochs=100, batch_size=32, device='cuda'):
+def save_samples(trainer, epoch, batch_idx, save_dir, num_samples=4):
+    """Generate and save samples during training"""
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Generate samples with intermediate steps
+    final_samples, intermediate_samples = trainer.sample(
+        batch_size=num_samples,
+        progressive=True
+    )
+
+    # Save final samples
+    save_image(
+        final_samples * 0.5 + 0.5,  # Denormalize
+        f"{save_dir}/samples_e{epoch}_b{batch_idx}.png",
+        nrow=2
+    )
+
+    # Save progressive generation steps
+    progressive_grid = make_grid(
+        torch.cat(intermediate_samples, dim=0) * 0.5 + 0.5,
+        nrow=num_samples
+    )
+    save_image(
+        progressive_grid,
+        f"{save_dir}/progressive_e{epoch}_b{batch_idx}.png"
+    )
+
+def train(image_paths, num_epochs=100, batch_size=32, device='cuda',
+          sample_interval=500, num_samples=4):
+    """
+    Training function with periodic sample generation
+    """
+    # Create output directory with timestamp
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_dir = f'ldm_training_{timestamp}'
+    samples_dir = f'{output_dir}/samples'
+    checkpoints_dir = f'{output_dir}/checkpoints'
+    os.makedirs(samples_dir, exist_ok=True)
+    os.makedirs(checkpoints_dir, exist_ok=True)
+
     # Initialize models
     autoencoder = Autoencoder()
     unet = UNet()
@@ -193,15 +313,28 @@ def train(image_paths, num_epochs=100, batch_size=32, device='cuda'):
     optimizer = torch.optim.AdamW(unet.parameters(), lr=1e-4)
 
     # Training loop
+    global_step = 0
     for epoch in range(num_epochs):
         total_loss = 0
-        for batch in dataloader:
+        for batch_idx, batch in enumerate(dataloader):
             batch = batch.to(device)
             loss = trainer.train_step(batch, optimizer)
             total_loss += loss
+            global_step += 1
 
+            # Print progress
+            if batch_idx % 10 == 0:
+                print(f"Epoch {epoch+1}/{num_epochs}, Batch {batch_idx}/{len(dataloader)}, "
+                      f"Loss: {loss:.4f}")
+
+            # Generate and save samples
+            if global_step % sample_interval == 0:
+                print("\nGenerating samples...")
+                save_samples(trainer, epoch + 1, batch_idx, samples_dir, num_samples)
+
+        # Calculate and print epoch average loss
         avg_loss = total_loss / len(dataloader)
-        print(f"Epoch {epoch+1}/{num_epochs}, Average Loss: {avg_loss:.4f}")
+        print(f"\nEpoch {epoch+1}/{num_epochs}, Average Loss: {avg_loss:.4f}")
 
         # Save checkpoint
         if (epoch + 1) % 10 == 0:
@@ -209,9 +342,14 @@ def train(image_paths, num_epochs=100, batch_size=32, device='cuda'):
                 'autoencoder_state_dict': autoencoder.state_dict(),
                 'unet_state_dict': unet.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'epoch': epoch
+                'epoch': epoch,
+                'global_step': global_step,
+                'loss': avg_loss
             }
-            torch.save(checkpoint, f'checkpoint_epoch_{epoch+1}.pt')
+            torch.save(
+                checkpoint,
+                f'{checkpoints_dir}/checkpoint_epoch_{epoch+1}.pt'
+            )
 
     return autoencoder, unet, trainer
 
@@ -221,5 +359,7 @@ autoencoder, unet, trainer = train(
     image_paths,
     num_epochs=100,
     batch_size=32,
-    device='cuda' if torch.cuda.is_available() else 'cpu'
+    device='cuda' if torch.cuda.is_available() else 'cpu',
+    sample_interval=500,
+    num_samples=4
 )
