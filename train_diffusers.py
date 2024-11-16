@@ -62,6 +62,7 @@ class CustomImageDataset(Dataset):
 def train_diffusion(
     train_dir="datasets/yes-to-the-dress-pngs",
     base_output_dir="output",
+    resume_from=None,       # Directory containing checkpoint to resume from
     image_size=512,
     train_batch_size=2,
     num_epochs=100,
@@ -75,9 +76,45 @@ def train_diffusion(
     mixed_precision="fp16",
     seed=42,
 ):
-    # Create output directories with timestamp
-    output_dir, samples_dir, checkpoints_dir = create_output_dirs(base_output_dir)
-    print(f"Output directory: {output_dir}")
+    # Create output directories with timestamp or use existing for resume
+    if resume_from:
+        # Remove trailing slash if present
+        resume_from = resume_from.rstrip('/')
+
+        # The resume_from path should point to a specific checkpoint directory
+        if not os.path.isdir(resume_from):
+            raise ValueError(f"Checkpoint directory {resume_from} not found")
+
+        # Go up two levels: from 'checkpoint-XXXX' to the root output directory
+        output_dir = os.path.dirname(os.path.dirname(resume_from))
+        samples_dir = os.path.join(output_dir, "samples")
+        checkpoints_dir = os.path.join(output_dir, "checkpoints")
+        print(f"Resuming training in: {output_dir}")
+
+        # Load the config from the root directory
+        config_path = os.path.join(output_dir, "config.json")
+        if not os.path.exists(config_path):
+            raise ValueError(f"Config file not found at {config_path}")
+
+        with open(config_path, "r") as f:
+            saved_config = json.load(f)
+
+        # Find the last epoch number from the checkpoint name
+        last_checkpoint = os.path.basename(resume_from)
+        if last_checkpoint == "checkpoint-final":
+            start_epoch = num_epochs - 1  # Start from the last epoch
+        else:
+            try:
+                # Handle both formats: checkpoint-N and checkpoint-NNNN
+                epoch_str = last_checkpoint.split("-")[1]
+                start_epoch = int(epoch_str.split("/")[0] if "/" in epoch_str else epoch_str)
+            except (IndexError, ValueError) as e:
+                raise ValueError(f"Invalid checkpoint directory format: {last_checkpoint}. Expected 'checkpoint-N' or 'checkpoint-NNNN'") from e
+    else:
+        output_dir, samples_dir, checkpoints_dir = create_output_dirs(base_output_dir)
+        print(f"Output directory: {output_dir}")
+        start_epoch = 0
+        saved_config = None
 
     # Initialize accelerator
     accelerator = Accelerator(
@@ -113,6 +150,12 @@ def train_diffusion(
         ),
     )
 
+    # Load checkpoint if resuming
+    if resume_from:
+        pipeline = DDIMPipeline.from_pretrained(resume_from)
+        model.load_state_dict(pipeline.unet.state_dict())
+        print(f"Loaded model weights from: {resume_from}")
+
     # Initialize noise scheduler
     noise_scheduler = DDIMScheduler(
         num_train_timesteps=num_train_timesteps,
@@ -128,7 +171,7 @@ def train_diffusion(
     dataset = CustomImageDataset(train_dir, image_size)
     train_dataloader = DataLoader(dataset, batch_size=train_batch_size, shuffle=True)
 
-    # Save training config
+    # Save or update training config
     config = {
         "train_dir": train_dir,
         "image_size": image_size,
@@ -139,10 +182,21 @@ def train_diffusion(
         "mixed_precision": mixed_precision,
         "seed": seed,
         "num_training_images": len(dataset),
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "num_train_timesteps": num_train_timesteps,
         "num_inference_steps": num_inference_steps,
     }
+
+    if resume_from:
+        # Update the existing config with new timestamp
+        saved_config.update({
+            "resumed_from": resume_from,
+            "resumed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "total_epochs": saved_config.get("total_epochs", 0) + num_epochs,
+        })
+        config = saved_config
+    else:
+        config["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        config["total_epochs"] = num_epochs
 
     with open(os.path.join(output_dir, "config.json"), "w") as f:
         json.dump(config, f, indent=2)
@@ -153,11 +207,11 @@ def train_diffusion(
     )
 
     # Training loop
-    global_step = 0
-    print(f"Starting training for {num_epochs} epochs...")
+    global_step = start_epoch * len(train_dataloader) if resume_from else 0
+    print(f"Starting training from epoch {start_epoch} for {num_epochs} epochs...")
     print(f"Number of training steps per epoch: {len(train_dataloader)}")
 
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         model.train()
 
         # Progress bar for this epoch
@@ -233,4 +287,9 @@ def train_diffusion(
         print(f"Saved final model: {final_path}")
 
 if __name__ == "__main__":
-    train_diffusion()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--resume_from", type=str, help="Path to checkpoint directory to resume from (e.g., output/train_2024.../checkpoints/checkpoint-005)")
+    args = parser.parse_args()
+
+    train_diffusion(resume_from=args.resume_from)
