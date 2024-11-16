@@ -325,7 +325,7 @@ def train(image_paths, num_epochs=100, batch_size=32, device='cuda',
                 sample = batch[:4]  # Take first 4 images
                 reconstruction = autoencoder(sample)
                 comparison = torch.cat([sample, reconstruction])
-                save_image(comparison * 0.5 + 0.5, f'autoencoder_progress_epoch_{epoch+1}.png', nrow=4)
+                save_image(comparison * 0.5 + 0.5, f'{samples_dir}/autoencoder_progress_epoch_{epoch+1}.png', nrow=4)
 
     trainer = DiffusionTrainer(autoencoder, unet, device)
 
