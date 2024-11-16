@@ -21,12 +21,13 @@ def create_output_dirs(base_dir="output"):
 
     return output_dir, samples_dir, checkpoints_dir
 
-def save_images(pipeline, step, samples_dir, num_images=4):
+def save_images(pipeline, step, samples_dir, num_images=4, num_inference_steps=50):
     """Generate and save sample images during training"""
     with torch.no_grad():
         images = pipeline(
             batch_size=num_images,
             generator=torch.manual_seed(42),
+            num_inference_steps=num_inference_steps,  # Use fewer steps for faster inference
         ).images
 
     # Save individual images
@@ -66,8 +67,10 @@ def train_diffusion(
     gradient_accumulation_steps=1,
     learning_rate=1e-4,
     lr_warmup_steps=500,
-    save_image_steps=100,    # Save images every N steps
+    save_image_steps=1000,    # Save images every N steps
     save_model_epochs=1,    # Save model every N epochs
+    num_train_timesteps=1000,  # Number of timesteps for training
+    num_inference_steps=50,   # Number of steps for generating samples
     mixed_precision="fp16",
     seed=42,
 ):
@@ -110,7 +113,10 @@ def train_diffusion(
     )
 
     # Initialize noise scheduler
-    noise_scheduler = DDPMScheduler(num_train_timesteps=1000)
+    noise_scheduler = DDPMScheduler(
+        num_train_timesteps=num_train_timesteps,  # More steps during training for better learning
+        prediction_type="epsilon"  # Predict the noise that was added
+    )
 
     # Create optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
@@ -133,6 +139,8 @@ def train_diffusion(
         "save_image_steps": save_image_steps,
         "save_model_epochs": save_model_epochs,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "num_train_timesteps": num_train_timesteps,
+        "num_inference_steps": num_inference_steps,
     }
 
     import json
@@ -199,7 +207,7 @@ def train_diffusion(
                     unet=accelerator.unwrap_model(model),
                     scheduler=noise_scheduler,
                 )
-                save_images(pipeline, global_step, samples_dir)
+                save_images(pipeline, global_step, samples_dir, num_inference_steps=num_inference_steps)
                 print(f"Samples saved to {samples_dir}")
 
         progress_bar.close()
