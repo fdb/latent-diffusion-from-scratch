@@ -1,9 +1,10 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-from diffusers import UNet2DModel, DDPMScheduler, DDPMPipeline
+from diffusers import UNet2DModel, KarrasVeScheduler, DDPMPipeline, DDIMPipeline
 from PIL import Image
 import os
+import math
 from accelerate import Accelerator
 from tqdm.auto import tqdm
 import torchvision
@@ -67,10 +68,12 @@ def train_diffusion(
     gradient_accumulation_steps=1,
     learning_rate=1e-4,
     lr_warmup_steps=500,
-    save_image_steps=1000,    # Save images every N steps
+    save_image_steps=500,    # Save images every N steps
     save_model_epochs=1,    # Save model every N epochs
     num_train_timesteps=1000,  # Number of timesteps for training
-    num_inference_steps=50,   # Number of steps for generating samples
+    num_inference_steps=25,   # Number of steps for generating samples
+    sigma_min=0.02,          # Minimum noise level
+    sigma_max=100,           # Maximum noise level
     mixed_precision="fp16",
     seed=42,
 ):
@@ -113,9 +116,13 @@ def train_diffusion(
     )
 
     # Initialize noise scheduler
-    noise_scheduler = DDPMScheduler(
-        num_train_timesteps=num_train_timesteps,  # More steps during training for better learning
-        prediction_type="epsilon"  # Predict the noise that was added
+    noise_scheduler = KarrasVeScheduler(
+        sigma_min=sigma_min,  # Minimum noise magnitude
+        sigma_max=sigma_max,   # Maximum noise magnitude
+        s_noise=1.007,   # Amount of additional noise for detail preservation
+        s_churn=80,      # Overall stochasticity control
+        s_min=0.05,      # Start of the sigma range for noise
+        s_max=50         # End of the sigma range for noise
     )
 
     # Create optimizer
@@ -141,6 +148,8 @@ def train_diffusion(
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "num_train_timesteps": num_train_timesteps,
         "num_inference_steps": num_inference_steps,
+        "sigma_min": sigma_min,
+        "sigma_max": sigma_max,
     }
 
     import json
@@ -172,19 +181,18 @@ def train_diffusion(
         for batch in train_dataloader:
             clean_images = batch
 
+            # Sample sigma (noise level) uniformly between [sigma_min, sigma_max] in log space
+            log_sigma_min = math.log(sigma_min)
+            log_sigma_max = math.log(sigma_max)
+            noise_level = torch.exp(torch.rand((clean_images.shape[0], )) * (log_sigma_max - log_sigma_min) + log_sigma_min).to(clean_images.device)
+
             # Sample noise and add to images
-            noise = torch.randn(clean_images.shape).to(clean_images.device)
-            bs = clean_images.shape[0]
-
-            # Sample timesteps
-            timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bs,), device=clean_images.device).long()
-
-            # Add noise to the clean images according to the noise magnitude at each timestep
-            noisy_images = noise_scheduler.add_noise(clean_images, noise, timesteps)
+            noise = torch.randn_like(clean_images)
+            noisy_images = clean_images + noise_level.view(-1, 1, 1, 1) * noise
 
             with accelerator.accumulate(model):
                 # Predict the noise
-                noise_pred = model(noisy_images, timesteps, return_dict=False)[0]
+                noise_pred = model(noisy_images, noise_level, return_dict=False)[0]
                 loss = torch.nn.functional.mse_loss(noise_pred, noise)
                 accelerator.backward(loss)
 
@@ -203,7 +211,8 @@ def train_diffusion(
             # Generate and save sample images based on steps
             if global_step % save_image_steps == 0 and accelerator.is_main_process:
                 print(f"\nGenerating sample images at step {global_step}...")
-                pipeline = DDPMPipeline(
+                # Use DDIMPipeline for inference
+                pipeline = DDIMPipeline(
                     unet=accelerator.unwrap_model(model),
                     scheduler=noise_scheduler,
                 )
@@ -214,7 +223,7 @@ def train_diffusion(
 
         # Save model checkpoints at epoch level
         if epoch % save_model_epochs == 0 and accelerator.is_main_process:
-            pipeline = DDPMPipeline(
+            pipeline = DDIMPipeline(
                 unet=accelerator.unwrap_model(model),
                 scheduler=noise_scheduler,
             )
@@ -224,7 +233,7 @@ def train_diffusion(
 
     # Save final model
     if accelerator.is_main_process:
-        pipeline = DDPMPipeline(
+        pipeline = DDIMPipeline(
             unet=accelerator.unwrap_model(model),
             scheduler=noise_scheduler,
         )
