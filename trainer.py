@@ -27,13 +27,13 @@ class Autoencoder(nn.Module):
 
         # Decoder
         self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(latent_dim, 256, 3, stride=2, padding=1),
+            nn.ConvTranspose2d(latent_dim, 256, 4, stride=2, padding=1),
             nn.ReLU(),
-            nn.ConvTranspose2d(256, 128, 3, stride=2, padding=1),
+            nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1),
             nn.ReLU(),
-            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1),
+            nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1),
             nn.ReLU(),
-            nn.ConvTranspose2d(64, 3, 3, stride=2, padding=1),
+            nn.ConvTranspose2d(64, 3, 4, stride=2, padding=1),
             nn.Tanh()
         )
 
@@ -246,7 +246,11 @@ class ImageDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         img = Image.open(self.image_paths[idx]).convert('RGB')
-        return self.transform(img)
+        img = self.transform(img)
+        # Verify image is 256 x 256
+        if list(img.size()) != [3, 256, 256]:
+            raise ValueError(f"Image {self.image_paths[idx]} has invalid dimensions {img.size()}")
+        return img
 
 def save_samples(trainer, epoch, batch_idx, save_dir, num_samples=4):
     """Generate and save samples during training"""
@@ -291,11 +295,39 @@ def train(image_paths, num_epochs=100, batch_size=32, device='cuda',
     # Initialize models
     autoencoder = Autoencoder()
     unet = UNet()
-    trainer = DiffusionTrainer(autoencoder, unet, device)
+
+    print("Training autoencoder...")
+    autoencoder = autoencoder.to(device)
+    ae_optimizer = torch.optim.AdamW(autoencoder.parameters(), lr=1e-4)
 
     # Create dataset and dataloader
     dataset = ImageDataset(image_paths)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    # Train autoencoder for a few epochs
+    for epoch in range(10):  # Adjust number of epochs as needed
+        total_loss = 0
+        for batch in dataloader:
+            batch = batch.to(device)
+            ae_optimizer.zero_grad()
+            reconstructed = autoencoder(batch)
+            loss = F.mse_loss(reconstructed, batch)
+            loss.backward()
+            ae_optimizer.step()
+            total_loss += loss.item()
+
+        avg_loss = total_loss / len(dataloader)
+        print(f"Autoencoder Epoch {epoch+1}, Loss: {avg_loss:.4f}")
+
+        # Save a sample reconstruction
+        if (epoch + 1) % 2 == 0:
+            with torch.no_grad():
+                sample = batch[:4]  # Take first 4 images
+                reconstruction = autoencoder(sample)
+                comparison = torch.cat([sample, reconstruction])
+                save_image(comparison * 0.5 + 0.5, f'autoencoder_progress_epoch_{epoch+1}.png', nrow=4)
+
+    trainer = DiffusionTrainer(autoencoder, unet, device)
 
     # Optimizer
     optimizer = torch.optim.AdamW(unet.parameters(), lr=1e-4)
