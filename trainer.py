@@ -114,19 +114,6 @@ class UNet(nn.Module):
 
         return self.final(u3)
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from torchvision import transforms
-from torchvision.utils import save_image, make_grid
-from PIL import Image
-import numpy as np
-import os
-from datetime import datetime
-
-# [Previous Autoencoder and UNet classes remain the same]
-
 class DiffusionTrainer:
     def __init__(self, autoencoder, unet, device='cuda'):
         self.device = device
@@ -147,9 +134,10 @@ class DiffusionTrainer:
 
         # Posterior variance calculation (beta_tilde)
         # For t > 0, calculate posterior variance β_t~
-        self.posterior_variance = self.betas * (1. - self.alphas_cumprod[:-1]) / (1. - self.alphas_cumprod[1:])
+        # self.posterior_variance = self.betas * (1. - self.alphas_cumprod[:-1]) / (1. - self.alphas_cumprod[1:])
         # For t = 0, append the minimum beta value
-        self.posterior_variance = torch.cat([self.posterior_variance, torch.tensor([self.beta_end], device=device)])
+        # self.posterior_variance = torch.cat([self.posterior_variance, torch.tensor([self.beta_end], device=device)])
+        self.posterior_variance = self.betas.clone()
 
         # Add assertions to catch dimension mismatches
         assert self.betas.shape == (self.num_timesteps,), f"Expected betas shape {self.num_timesteps}, got {self.betas.shape}"
@@ -294,7 +282,7 @@ def train(image_paths, num_epochs=100, batch_size=32, device='cuda',
     """
     # Create output directory with timestamp
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_dir = f'ldm_training_{timestamp}'
+    output_dir = f'output/training_{timestamp}'
     samples_dir = f'{output_dir}/samples'
     checkpoints_dir = f'{output_dir}/checkpoints'
     os.makedirs(samples_dir, exist_ok=True)
