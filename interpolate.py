@@ -23,7 +23,7 @@ def interpolate(pipeline, noise_1_seed, noise_2_seed, steps, inference_steps, ou
 
         with torch.no_grad():
             image = pipeline(num_inference_steps=inference_steps).images[0]
-        image.save(f'output/frame-{i:04d}.png')
+        image.save(f'{output_dir}/frame-{i:04d}.png')
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser(description='Interpolate between two noise samples')
@@ -37,5 +37,5 @@ if __name__=='__main__':
 
     os.makedirs(args.output, exist_ok=True)
 
-    pipeline = DDIMPipeline.from_pretrained(args.checkpoint)
+    pipeline = DDIMPipeline.from_pretrained(args.checkpoint).to('cuda')
     interpolate(pipeline, args.n1, args.n2, args.steps, args.inference_steps, args.output)
