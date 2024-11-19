@@ -1,82 +1,94 @@
-from diffusers import AutoencoderKL, DDIMPipeline
 import torch
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
+from diffusers import DDIMPipeline
 from PIL import Image
-import os
 from tqdm.auto import tqdm
+import os
 import argparse
 
-def generate_and_encode_images(pipeline, vae, seed1, seed2, inference_steps, output_dir):
-    # Generate first image
-    torch.manual_seed(seed1)
-    with torch.no_grad():
-        image1 = pipeline(num_inference_steps=inference_steps).images[0]
-    image1.save(f'{output_dir}/image1.png')
+def generate_with_cfg(unet, scheduler, noise, timesteps, guidance_scale):
+    # Run twice - with and without guidance
+    sample = noise
 
-    # Generate second image
-    torch.manual_seed(seed2)
-    with torch.no_grad():
-        image2 = pipeline(num_inference_steps=inference_steps).images[0]
-    image2.save(f'{output_dir}/image2.png')
+    for t in timesteps:
+        # Double the sample for with/without guidance
+        latent_model_input = torch.cat([sample] * 2, dim=0)
 
-    # Convert to tensors
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5]),
-    ])
+        with torch.no_grad():
+            # Get both predictions
+            noise_pred_uncond, noise_pred_cond = unet(
+                latent_model_input,
+                t,
+                return_dict=False
+            )[0].chunk(2)
 
-    image1_tensor = transform(image1).unsqueeze(0).to('cuda')
-    image2_tensor = transform(image2).unsqueeze(0).to('cuda')
+            # Apply guidance
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
-    # Encode images to latent space using VAE
-    with torch.no_grad():
-        latent1 = vae.encode(image1_tensor).latent_dist.sample()
-        latent2 = vae.encode(image2_tensor).latent_dist.sample()
+            # Scheduler step
+            sample = scheduler.step(noise_pred, t, sample).prev_sample
 
-    return latent1, latent2
+    return sample
 
-def interpolate(pipeline, vae, latent1, latent2, steps, inference_steps, output_dir):
-    # Interpolate in VAE latent space and decode
+def interpolate(pipeline, noise_1_seed, noise_2_seed, steps, inference_steps, output_dir,
+                min_guidance=1.0, max_guidance=7.5):
+    scheduler = pipeline.scheduler
+    unet = pipeline.unet
+
+    # Set up scheduler timesteps
+    scheduler.set_timesteps(inference_steps)
+
+    # Generate two noise patterns
+    torch.manual_seed(noise_1_seed)
+    noise_1 = torch.randn(1, 3, 512, 512).to('cuda')
+    torch.manual_seed(noise_2_seed)
+    noise_2 = torch.randn(1, 3, 512, 512).to('cuda')
+
     for i in tqdm(range(steps)):
         t_scale = i / (steps - 1)
 
-        # Interpolate in VAE latent space
-        interpolated_latent = latent1 * (1 - t_scale) + latent2 * t_scale
+        # Interpolate noise
+        interpolated_noise = noise_1 * (1 - t_scale) + noise_2 * t_scale
 
-        # Decode interpolated latent
-        with torch.no_grad():
-            image = vae.decode(interpolated_latent).sample
+        # Interpolate guidance scale
+        guidance_scale = min_guidance * (1 - t_scale) + max_guidance * t_scale
+
+        # Generate image with current guidance scale
+        sample = generate_with_cfg(
+            unet,
+            scheduler,
+            interpolated_noise,
+            scheduler.timesteps,
+            guidance_scale
+        )
 
         # Save image
-        image = (image / 2 + 0.5).clamp(0, 1)
+        image = (sample / 2 + 0.5).clamp(0, 1)
         image = image.cpu().permute(0, 2, 3, 1).numpy()[0]
         image = Image.fromarray((image * 255).round().astype("uint8"))
         image.save(f'{output_dir}/frame-{i:04d}.png')
 
 if __name__=='__main__':
-    parser = argparse.ArgumentParser(description='Interpolate between two images using VAE')
+    parser = argparse.ArgumentParser(description='Interpolate between two noise samples with CFG')
     parser.add_argument('checkpoint', type=str, help='Path to the checkpoint')
-    parser.add_argument('--n1', type=int, help='Seed of the first image', default=1234)
-    parser.add_argument('--n2', type=int, help='Seed of the second image', default=5678)
+    parser.add_argument('--n1', type=int, help='Seed of the first noise sample', default=1234)
+    parser.add_argument('--n2', type=int, help='Seed of the second noise sample', default=5678)
     parser.add_argument('--steps', type=int, help='Number of steps to interpolate', default=30)
     parser.add_argument('--inference_steps', type=int, help='Number of inference steps', default=50)
+    parser.add_argument('--min_guidance', type=float, help='Minimum guidance scale', default=1.0)
+    parser.add_argument('--max_guidance', type=float, help='Maximum guidance scale', default=7.5)
     parser.add_argument('--output', type=str, help='Output directory', default='output')
     args = parser.parse_args()
 
     os.makedirs(args.output, exist_ok=True)
-
-    # Load pipeline and VAE
     pipeline = DDIMPipeline.from_pretrained(args.checkpoint).to('cuda')
-    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to('cuda')
 
-    # Generate images and get their VAE latents
-    latent1, latent2 = generate_and_encode_images(
-        pipeline, vae, args.n1, args.n2, args.inference_steps, args.output
-    )
-
-    # Interpolate between the latents and generate frames
     interpolate(
-        pipeline, vae, latent1, latent2,
-        args.steps, args.inference_steps, args.output
+        pipeline,
+        args.n1,
+        args.n2,
+        args.steps,
+        args.inference_steps,
+        args.output,
+        args.min_guidance,
+        args.max_guidance
     )
