@@ -4,7 +4,7 @@ import os
 from tqdm import tqdm
 
 
-image_paths = glob("datasets/yes-to-the-dress-jpeg/*.jpg")
+image_paths = glob("datasets/yes-to-the-dress-paired/*.png")
 for image_path in tqdm(image_paths):
     #print(image_path)
     img = Image.open(image_path)

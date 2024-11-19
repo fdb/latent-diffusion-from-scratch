@@ -60,7 +60,7 @@ class CustomImageDataset(Dataset):
         return self.transform(image)
 
 def train_diffusion(
-    train_dir="datasets/yes-to-the-dress-pngs",
+    train_dir="datasets/yes-to-the-dress",
     base_output_dir="output",
     resume_from=None,       # Directory containing checkpoint to resume from
     image_size=512,
