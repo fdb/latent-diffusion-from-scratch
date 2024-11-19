@@ -23,14 +23,9 @@ def interpolate(pipeline, noise_1_seed, noise_2_seed, steps, inference_steps, ou
 
         with torch.no_grad():
             image = pipeline(num_inference_steps=inference_steps).images[0]
-        # pil_image = image.cpu().permute(0, 2, 3, 1)
-        # pil_image = (pil_image + 1) * 127.5
-        # pil_image = pil_image.numpy().astype('uint8')
-        # pil_image = Image.fromarray(pil_image[0])
         image.save(f'output/frame-{i:04d}.png')
 
 if __name__=='__main__':
-
     parser = argparse.ArgumentParser(description='Interpolate between two noise samples')
     parser.add_argument('checkpoint', type=str, help='Path to the checkpoint')
     parser.add_argument('--n1', type=int, help='Seed of the first noise sample', default=1234)
@@ -39,6 +34,8 @@ if __name__=='__main__':
     parser.add_argument('--inference_steps', type=int, help='Number of inference steps', default=25)
     parser.add_argument('--output', type=str, help='Output directory', default='output')
     args = parser.parse_args()
+
+    os.makedirs(args.output, exist_ok=True)
 
     pipeline = DDIMPipeline.from_pretrained(args.checkpoint)
     interpolate(pipeline, args.n1, args.n2, args.steps, args.inference_steps, args.output)
