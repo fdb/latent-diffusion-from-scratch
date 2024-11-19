@@ -12,17 +12,32 @@ from datetime import datetime
 import argparse
 
 def interpolate(pipeline, noise_1_seed, noise_2_seed, steps, inference_steps, output_dir):
-    torch.manual_seed(noise_1_seed)
-    noise_1 = torch.randn(1, 3, 64, 64)
-    torch.manual_seed(noise_2_seed)
-    noise_2 = torch.randn(1, 3, 64, 64)
+    scheduler = pipeline.scheduler
+    unet = pipeline.unet
+    scheduler.set_timesteps(inference_steps)
 
+    # Set the seeds for the noise samples
+    torch.manual_seed(noise_1_seed)
+    noise_1 = torch.randn(1, 3, 512, 512).to('cuda')
+    torch.manual_seed(noise_2_seed)
+    noise_2 = torch.randn(1, 3, 512, 512).to('cuda')
+
+    # Interpolation loop
     for i in tqdm(range(steps)):
         t = i / (steps - 1)
         interpolated_noise = noise_1 * (1 - t) + noise_2 * t
 
-        with torch.no_grad():
-            image = pipeline(num_inference_steps=inference_steps).images[0]
+        sample = interpolated_noise
+        timesteps = scheduler.timesteps
+
+        for t in timesteps:
+            with torch.no_grad():
+                noise_pred = unet(sample, t, return_dict=False)[0]
+            sample = scheduler.step(noise_pred, t, sample).prev_sample
+
+        image = (sample / 2 + 0.5).clamp(0, 1)
+        image = image.cpu().permute(0, 2, 3, 1).numpy()[0]
+        image = Image.fromarray((image * 255).round().astype("uint8"))
         image.save(f'{output_dir}/frame-{i:04d}.png')
 
 if __name__=='__main__':
