@@ -9,3 +9,10 @@ pip install torch torchvision accelerate diffusers jupyter matplotlib fastcore h
 jupyter notebook
 ```
 
+## Installation with Anaconda
+
+```bash
+conda create -n diffusers python=3.10
+conda activate diffusers
+conda install pytorch torchvision torchaudio diffusers accelerate -c conda-forge
+```
