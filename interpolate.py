@@ -1,9 +1,8 @@
 import json
 import torch
-import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-from diffusers import DDIMPipeline, DDIMInverseScheduler
+from diffusers import DDIMPipeline
 from PIL import Image
 import os
 # from accelerate import Accelerator
@@ -12,76 +11,40 @@ import torchvision
 from datetime import datetime
 import argparse
 
-def generate_initial_images(pipeline, seed1, seed2, inference_steps, output_dir):
-    # Generate first image
-    torch.manual_seed(seed1)
-    with torch.no_grad():
-        image1 = pipeline(num_inference_steps=inference_steps).images[0]
-    image1.save(f'{output_dir}/image1.png')
-
-    # Generate second image
-    torch.manual_seed(seed2)
-    with torch.no_grad():
-        image2 = pipeline(num_inference_steps=inference_steps).images[0]
-    image2.save(f'{output_dir}/image2.png')
-
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5]),
-    ])
-
-    image1_tensor = transform(image1).unsqueeze(0).to('cuda')
-    image2_tensor = transform(image2).unsqueeze(0).to('cuda')
-
-    return image1_tensor, image2_tensor
-
-
-def interpolate(pipeline, image1_tensor, image2_tensor, steps, inference_steps, output_dir):
-    # Get components
+def interpolate(pipeline, seed1, seed2, steps, inference_steps, output_dir):
+    scheduler = pipeline.scheduler
     unet = pipeline.unet
+    scheduler.set_timesteps(inference_steps)
 
-    # Create inverse scheduler
-    inverse_scheduler = DDIMInverseScheduler.from_config(pipeline.scheduler.config)
-    inverse_scheduler.set_timesteps(inference_steps)
+    # Generate two noise patterns
+    torch.manual_seed(seed1)
+    noise_1 = torch.randn(1, 3, 512, 512).to('cuda')
+    torch.manual_seed(seed2)
+    noise_2 = torch.randn(1, 3, 512, 512).to('cuda')
 
-    # Get forward scheduler for generation
-    forward_scheduler = pipeline.scheduler
-    forward_scheduler.set_timesteps(inference_steps)
-
-    # Get latent representations through inverse diffusion
-    print("Getting latent for image 1...")
-    sample = image1_tensor
-    latent1 = sample
-    for t in tqdm(inverse_scheduler.timesteps):
-        with torch.no_grad():
-            noise_pred = unet(sample, t, return_dict=False)[0]
-            sample = inverse_scheduler.step(noise_pred, t, sample).prev_sample
-    latent1 = sample
-
-    print("Getting latent for image 2...")
-    sample = image2_tensor
-    latent2 = sample
-    for t in tqdm(inverse_scheduler.timesteps):
-        with torch.no_grad():
-            noise_pred = unet(sample, t, return_dict=False)[0]
-            sample = inverse_scheduler.step(noise_pred, t, sample).prev_sample
-    latent2 = sample
-
-    # Interpolate between latents and generate frames
     for i in tqdm(range(steps)):
         t_scale = i / (steps - 1)
+        sample = noise_1 * (1 - t_scale) + noise_2 * t_scale
 
-        # Interpolate in latent space
-        interpolated_latent = latent1 * (1 - t_scale) + latent2 * t_scale
+        # Store intermediate denoising states
+        denoising_states = []
 
-        # Generate image from interpolated latent
-        sample = interpolated_latent
-        for t in forward_scheduler.timesteps:
+        # First forward pass to get intermediate states
+        for t in scheduler.timesteps:
             with torch.no_grad():
                 noise_pred = unet(sample, t, return_dict=False)[0]
-                sample = forward_scheduler.step(noise_pred, t, sample).prev_sample
+                sample = scheduler.step(noise_pred, t, sample).prev_sample
+                denoising_states.append(sample.clone())
 
-        # Save image
+        # Second pass with interpolated intermediate states
+        sample = noise_1
+        for idx, t in enumerate(scheduler.timesteps):
+            with torch.no_grad():
+                noise_pred = unet(sample, t, return_dict=False)[0]
+                next_sample = scheduler.step(noise_pred, t, sample).prev_sample
+                # Interpolate with the stored state
+                sample = next_sample * (1 - t_scale) + denoising_states[idx] * t_scale
+
         image = (sample / 2 + 0.5).clamp(0, 1)
         image = image.cpu().permute(0, 2, 3, 1).numpy()[0]
         image = Image.fromarray((image * 255).round().astype("uint8"))
@@ -100,5 +63,4 @@ if __name__=='__main__':
     os.makedirs(args.output, exist_ok=True)
 
     pipeline = DDIMPipeline.from_pretrained(args.checkpoint).to('cuda')
-    image1_tensor, image2_tensor = generate_initial_images(pipeline, args.n1, args.n2, args.inference_steps, args.output)
-    interpolate(pipeline, image1_tensor, image2_tensor, args.steps, args.inference_steps, args.output)
+    interpolate(pipeline, args.n1, args.n2, args.steps, args.inference_steps, args.output)
