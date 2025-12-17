@@ -1,0 +1,17 @@
+[project]
+name = "latent-diffusion-from-scratch"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "accelerate>=1.12.0",
+    "diffusers>=0.36.0",
+    "fastcore>=1.9.2",
+    "huggingface>=0.0.1",
+    "jupyter>=1.1.1",
+    "jupyterlab>=4.5.1",
+    "matplotlib>=3.10.8",
+    "torch>=2.9.1",
+    "torchvision>=0.24.1",
+]
