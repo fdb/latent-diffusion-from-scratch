@@ -119,6 +119,21 @@ class PairedImageDataset(Dataset):
         return source_image, target_image
 
 
+def unwrap_model(model):
+    """Unwrap a model from DDP/compile wrappers.
+
+    Works around a bug in some accelerate versions where
+    unwrap_model fails with KeyError on '_orig_mod'.
+    """
+    # Strip DDP / FSDP wrapper
+    if hasattr(model, "module"):
+        model = model.module
+    # Strip torch.compile wrapper
+    if hasattr(model, "_orig_mod"):
+        model = model._orig_mod
+    return model
+
+
 def train_paired_diffusion(
     train_dir="datasets/research-week-2025",
     base_output_dir="output",
@@ -357,7 +372,7 @@ def train_paired_diffusion(
             # Generate and save sample images
             if global_step % save_image_steps == 0 and accelerator.is_main_process:
                 print(f"\nGenerating sample images at step {global_step}...")
-                unwrapped_model = accelerator.unwrap_model(model, keep_torch_compile=True)
+                unwrapped_model = unwrap_model(model)
                 save_paired_images(
                     unwrapped_model,
                     noise_scheduler,
@@ -373,7 +388,7 @@ def train_paired_diffusion(
 
         # Save model checkpoint
         if epoch % save_model_epochs == 0 and accelerator.is_main_process:
-            unwrapped_model = accelerator.unwrap_model(model, keep_torch_compile=True)
+            unwrapped_model = unwrap_model(model)
             checkpoint_path = os.path.join(checkpoints_dir, f"checkpoint-{epoch:04d}")
             os.makedirs(checkpoint_path, exist_ok=True)
 
@@ -390,7 +405,7 @@ def train_paired_diffusion(
 
     # Save final model
     if accelerator.is_main_process:
-        unwrapped_model = accelerator.unwrap_model(model, keep_torch_compile=True)
+        unwrapped_model = unwrap_model(model)
         final_path = os.path.join(checkpoints_dir, "checkpoint-final")
         os.makedirs(final_path, exist_ok=True)
         torch.save(
