@@ -357,7 +357,7 @@ def train_paired_diffusion(
             # Generate and save sample images
             if global_step % save_image_steps == 0 and accelerator.is_main_process:
                 print(f"\nGenerating sample images at step {global_step}...")
-                unwrapped_model = accelerator.unwrap_model(model)
+                unwrapped_model = accelerator.unwrap_model(model, keep_torch_compile=True)
                 save_paired_images(
                     unwrapped_model,
                     noise_scheduler,
@@ -373,7 +373,7 @@ def train_paired_diffusion(
 
         # Save model checkpoint
         if epoch % save_model_epochs == 0 and accelerator.is_main_process:
-            unwrapped_model = accelerator.unwrap_model(model)
+            unwrapped_model = accelerator.unwrap_model(model, keep_torch_compile=True)
             checkpoint_path = os.path.join(checkpoints_dir, f"checkpoint-{epoch:04d}")
             os.makedirs(checkpoint_path, exist_ok=True)
 
@@ -390,7 +390,7 @@ def train_paired_diffusion(
 
     # Save final model
     if accelerator.is_main_process:
-        unwrapped_model = accelerator.unwrap_model(model)
+        unwrapped_model = accelerator.unwrap_model(model, keep_torch_compile=True)
         final_path = os.path.join(checkpoints_dir, "checkpoint-final")
         os.makedirs(final_path, exist_ok=True)
         torch.save(
