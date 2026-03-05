@@ -16,8 +16,8 @@
 
 set -e
 
-NUM_GPUS=$(python -c "import torch; print(torch.cuda.device_count())")
+NUM_GPUS=$(uv run python -c "import torch; print(torch.cuda.device_count())")
 
 echo "Detected $NUM_GPUS GPU(s)"
 
-accelerate launch --num_processes="$NUM_GPUS" train_paired_256.py "$@"
+uv run accelerate launch --num_processes="$NUM_GPUS" train_paired_256.py "$@"
