@@ -180,6 +180,12 @@ def train_paired_diffusion(
 
     torch.manual_seed(seed)
 
+    # Performance: enable cuDNN benchmarking (input size is fixed at 256x256)
+    torch.backends.cudnn.benchmark = True
+    # Performance: allow TF32 on Ampere+ GPUs for faster matmuls/convolutions
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
     # Initialize UNet model with 6 input channels (3 noisy target + 3 source condition)
     model = UNet2DModel(
         sample_size=image_size,
@@ -204,6 +210,11 @@ def train_paired_diffusion(
             "UpBlock2D",
         ),
     )
+
+    # Performance: use channels_last memory format for Tensor Core optimization
+    model = model.to(memory_format=torch.channels_last)
+    # Performance: compile the model for fused CUDA kernels (PyTorch 2.0+)
+    model = torch.compile(model)
 
     # Load checkpoint if resuming
     if resume_from:
@@ -231,7 +242,10 @@ def train_paired_diffusion(
 
     # Create dataset and dataloader
     dataset = PairedImageDataset(train_dir, image_size)
-    train_dataloader = DataLoader(dataset, batch_size=train_batch_size, shuffle=True)
+    train_dataloader = DataLoader(
+        dataset, batch_size=train_batch_size, shuffle=True,
+        num_workers=4, pin_memory=True, persistent_workers=True,
+    )
 
     # Keep a fixed batch of source images for consistent visualization
     fixed_source_batch = None
@@ -293,6 +307,9 @@ def train_paired_diffusion(
         running_loss = 0.0
 
         for source_images, target_images in train_dataloader:
+            source_images = source_images.to(memory_format=torch.channels_last)
+            target_images = target_images.to(memory_format=torch.channels_last)
+
             # Capture fixed source images for visualization
             if fixed_source_batch is None:
                 fixed_source_batch = source_images[:4].clone()
