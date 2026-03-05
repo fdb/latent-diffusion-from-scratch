@@ -1,14 +1,15 @@
 import json
-import torch
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-from diffusers import UNet2DModel, DDIMScheduler, DDIMPipeline
-from PIL import Image
 import os
-from accelerate import Accelerator
-from tqdm.auto import tqdm
-import torchvision
 from datetime import datetime
+
+import torch
+import torchvision
+from accelerate import Accelerator
+from diffusers import DDIMPipeline, DDIMScheduler, UNet2DModel
+from PIL import Image
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
+from tqdm.auto import tqdm
 
 
 def create_output_dirs(base_dir="output"):
@@ -48,7 +49,7 @@ def save_images(pipeline, step, samples_dir, num_images=4, num_inference_steps=2
 class CustomImageDataset(Dataset):
     def __init__(self, image_dir, image_size=256):
         self.image_dir = image_dir
-        self.image_files = [f for f in os.listdir(image_dir) if f.endswith(".png")]
+        self.image_files = [f for f in os.listdir(image_dir) if f.endswith(".jpg")]
         self.transform = transforms.Compose(
             [
                 transforms.Resize((image_size, image_size)),
@@ -67,7 +68,7 @@ class CustomImageDataset(Dataset):
 
 
 def train_diffusion(
-    train_dir="datasets/yes-to-the-dress",
+    train_dir="datasets/research-week-2025",
     base_output_dir="output",
     resume_from=None,  # Directory containing checkpoint to resume from
     image_size=256,
@@ -231,7 +232,7 @@ def train_diffusion(
         progress_bar = tqdm(
             total=len(train_dataloader),
             disable=not accelerator.is_local_main_process,
-            desc=f"Epoch {epoch}/{num_epochs-1}",
+            desc=f"Epoch {epoch}/{num_epochs - 1}",
         )
 
         running_loss = 0.0
@@ -270,7 +271,9 @@ def train_diffusion(
 
             # Update progress bar
             progress_bar.update(1)
-            progress_bar.set_postfix({"loss": f"{running_loss/(progress_bar.n+1):.4f}"})
+            progress_bar.set_postfix(
+                {"loss": f"{running_loss / (progress_bar.n + 1):.4f}"}
+            )
 
             global_step += 1
 
