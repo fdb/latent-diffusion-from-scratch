@@ -244,7 +244,7 @@ def train_paired_diffusion(
     dataset = PairedImageDataset(train_dir, image_size)
     train_dataloader = DataLoader(
         dataset, batch_size=train_batch_size, shuffle=True,
-        num_workers=4, pin_memory=True, persistent_workers=True,
+        num_workers=4, pin_memory=False, persistent_workers=True,
     )
 
     # Keep a fixed batch of source images for consistent visualization
