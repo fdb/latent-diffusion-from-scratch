@@ -213,10 +213,8 @@ def train_paired_diffusion(
 
     # Performance: use channels_last memory format for Tensor Core optimization
     model = model.to(memory_format=torch.channels_last)
-    # Performance: compile the model for fused CUDA kernels (PyTorch 2.0+)
-    model = torch.compile(model)
 
-    # Load checkpoint if resuming
+    # Load checkpoint if resuming (must happen before torch.compile)
     if resume_from:
         checkpoint_path = os.path.join(resume_from, "unet_state_dict.pt")
         if os.path.exists(checkpoint_path):
@@ -229,6 +227,9 @@ def train_paired_diffusion(
             loaded_unet = LoadUNet.from_pretrained(resume_from)
             model.load_state_dict(loaded_unet.state_dict())
             print(f"Loaded model weights from: {resume_from}")
+
+    # Performance: compile the model for fused CUDA kernels (PyTorch 2.0+)
+    model = torch.compile(model)
 
     # Initialize noise scheduler
     noise_scheduler = DDIMScheduler(
