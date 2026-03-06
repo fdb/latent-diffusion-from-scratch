@@ -1,0 +1,116 @@
+{
+  "version": 5,
+  "nodes": [
+    {
+      "id": 6,
+      "name": "Out",
+      "type": "core.out",
+      "x": 302,
+      "y": 643
+    },
+    {
+      "id": 7,
+      "name": "Webcam Image",
+      "type": "image.webcamImage",
+      "x": 433,
+      "y": 37,
+      "values": {
+        "frameRate": {
+          "type": "value",
+          "value": 60
+        },
+        "camera": {
+          "type": "value",
+          "value": "FaceTime HD Camera (2C0E:82E3)"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "name": "Resize",
+      "type": "image.resize",
+      "x": 451,
+      "y": 164
+    },
+    {
+      "id": 9,
+      "name": "Detect Pose",
+      "type": "ml.detectPose",
+      "x": 427,
+      "y": 306,
+      "values": {
+        "draw points": {
+          "type": "value",
+          "value": false
+        },
+        "points radius": {
+          "type": "value",
+          "value": 4
+        }
+      }
+    },
+    {
+      "id": 10,
+      "name": "ONNX Image Model",
+      "type": "ml.onnxImageModel",
+      "x": 468,
+      "y": 443,
+      "values": {
+        "model": {
+          "type": "value",
+          "value": "pose_lines_epoch_15.onnx"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "name": "Stack",
+      "type": "image.stack",
+      "x": 306,
+      "y": 503
+    }
+  ],
+  "connections": [
+    {
+      "outNode": 7,
+      "outPort": "image",
+      "inNode": 8,
+      "inPort": "in"
+    },
+    {
+      "outNode": 8,
+      "outPort": "out",
+      "inNode": 9,
+      "inPort": "in"
+    },
+    {
+      "outNode": 9,
+      "outPort": "out",
+      "inNode": 10,
+      "inPort": "in"
+    },
+    {
+      "outNode": 9,
+      "outPort": "out",
+      "inNode": 11,
+      "inPort": "image 1"
+    },
+    {
+      "outNode": 10,
+      "outPort": "out",
+      "inNode": 11,
+      "inPort": "image 2"
+    },
+    {
+      "outNode": 11,
+      "outPort": "out",
+      "inNode": 6,
+      "inPort": "in"
+    }
+  ],
+  "settings": {
+    "oscEnabled": false,
+    "oscPort": 8000
+  },
+  "types": []
+}
