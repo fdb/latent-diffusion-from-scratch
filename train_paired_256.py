@@ -27,7 +27,7 @@ def create_output_dirs(base_dir="output"):
 
 def save_paired_images(
     model, scheduler, source_images, step, samples_dir, device,
-    num_inference_steps=50,
+    num_inference_steps=20,
 ):
     """Generate and save sample images during training.
 
@@ -142,11 +142,11 @@ def train_paired_diffusion(
     train_batch_size=4,
     num_epochs=100,
     gradient_accumulation_steps=4,
-    learning_rate=1e-5,
+    learning_rate=1e-4,
     save_image_steps=500,
     save_model_epochs=1,
     num_train_timesteps=1000,
-    num_inference_steps=50,
+    num_inference_steps=20,
     mixed_precision="fp16",
     seed=42,
 ):
@@ -440,7 +440,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=1e-5,
+        default=1e-4,
         help="Learning rate",
     )
     args = parser.parse_args()
