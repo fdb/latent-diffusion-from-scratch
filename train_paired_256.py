@@ -134,6 +134,37 @@ def unwrap_model(model):
     return model
 
 
+def create_model(image_size=256):
+    """Create the paired conditional UNet model.
+
+    Returns a UNet2DModel with 6 input channels (3 noisy target + 3 source
+    conditioning) and 3 output channels (predicted noise).
+    """
+    return UNet2DModel(
+        sample_size=image_size,
+        in_channels=6,
+        out_channels=3,
+        layers_per_block=2,
+        block_out_channels=(128, 256, 384, 512, 768, 1024),
+        down_block_types=(
+            "DownBlock2D",
+            "DownBlock2D",
+            "AttnDownBlock2D",
+            "AttnDownBlock2D",
+            "AttnDownBlock2D",
+            "DownBlock2D",
+        ),
+        up_block_types=(
+            "UpBlock2D",
+            "AttnUpBlock2D",
+            "AttnUpBlock2D",
+            "AttnUpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+        ),
+    )
+
+
 def train_paired_diffusion(
     train_dir="datasets/research-week-2025",
     base_output_dir="output",
@@ -202,29 +233,7 @@ def train_paired_diffusion(
     torch.backends.cudnn.allow_tf32 = True
 
     # Initialize UNet model with 6 input channels (3 noisy target + 3 source condition)
-    model = UNet2DModel(
-        sample_size=image_size,
-        in_channels=6,   # 3 channels noisy target + 3 channels source conditioning
-        out_channels=3,  # predict noise for the target only
-        layers_per_block=2,
-        block_out_channels=(128, 256, 384, 512, 768, 1024),
-        down_block_types=(
-            "DownBlock2D",
-            "DownBlock2D",
-            "AttnDownBlock2D",
-            "AttnDownBlock2D",
-            "AttnDownBlock2D",
-            "DownBlock2D",
-        ),
-        up_block_types=(
-            "UpBlock2D",
-            "AttnUpBlock2D",
-            "AttnUpBlock2D",
-            "AttnUpBlock2D",
-            "UpBlock2D",
-            "UpBlock2D",
-        ),
-    )
+    model = create_model(image_size)
 
     # Performance: use channels_last memory format for Tensor Core optimization
     model = model.to(memory_format=torch.channels_last)
