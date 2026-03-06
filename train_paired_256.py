@@ -243,8 +243,10 @@ def train_paired_diffusion(
             model.load_state_dict(loaded_unet.state_dict())
             print(f"Loaded model weights from: {resume_from}")
 
-    # Performance: compile the model for fused CUDA kernels (PyTorch 2.0+)
-    model = torch.compile(model)
+    # Note: torch.compile is intentionally disabled. For this 356M-param UNet,
+    # compilation takes ~2 minutes and Accelerate's gradient accumulation causes
+    # repeated recompilations, making training ~90x slower than eager mode.
+    # model = torch.compile(model)
 
     # Initialize noise scheduler
     noise_scheduler = DDIMScheduler(
