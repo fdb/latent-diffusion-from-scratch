@@ -1,0 +1,91 @@
+{
+  "version": 5,
+  "nodes": [
+    {
+      "id": 1,
+      "name": "Out",
+      "type": "core.out",
+      "x": 383.3974678596792,
+      "y": 467.5193455198784
+    },
+    {
+      "id": 5,
+      "name": "PairedDiffusion",
+      "type": "project.pairedDiffusion",
+      "x": 385.7415538971675,
+      "y": 367.3630807876311,
+      "values": {
+        "UNet Model": {
+          "type": "value",
+          "value": "output/models/paired_diffusion_epoch6.onnx"
+        },
+        "Seed": {
+          "type": "value",
+          "value": 44
+        }
+      }
+    },
+    {
+      "id": 9,
+      "name": "Resize",
+      "type": "image.resize",
+      "x": 382.35923213261725,
+      "y": 268.79135960315034,
+      "values": {
+        "width": {
+          "type": "value",
+          "value": 256
+        },
+        "height": {
+          "type": "value",
+          "value": 256
+        }
+      }
+    },
+    {
+      "id": 10,
+      "name": "Load Image",
+      "type": "image.loadImage",
+      "x": 385.0620799003521,
+      "y": 174.13699262331286,
+      "values": {
+        "file": {
+          "type": "value",
+          "value": "media/example-pose.png"
+        }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "outNode": 5,
+      "outPort": "Generated Image",
+      "inNode": 1,
+      "inPort": "in"
+    },
+    {
+      "outNode": 9,
+      "outPort": "out",
+      "inNode": 5,
+      "inPort": "Conditioning Image"
+    },
+    {
+      "outNode": 10,
+      "outPort": "out",
+      "inNode": 9,
+      "inPort": "in"
+    }
+  ],
+  "settings": {
+    "oscEnabled": false,
+    "oscPort": 8000
+  },
+  "types": [
+    {
+      "name": "PairedDiffusion",
+      "type": "project.pairedDiffusion",
+      "source": "/**\n * @name Paired Diffusion (DDIM)\n * @description Conditional diffusion with DDIM sampling. Takes a conditioning image (e.g. pose skeleton) and generates a paired output.\n * @category ml\n */\n\nconst unetFileIn = node.fileIn('UNet Model', '');\nconst seedIn = node.numberIn('Seed', 42, { min: 1, max: 1000000, step: 1 });\nconst numStepsIn = node.numberIn('Steps', 20, { min: 1, max: 1000, step: 1 });\nconst conditioningImageIn = node.imageIn('Conditioning Image');\nconst imageOut = node.imageOut('Generated Image');\n\n// Internal state\nlet unetSession;\nlet currentUnetPath;\nlet isGenerating = false;\nlet framebuffer;\nlet _alphasCumprod;\n\n// Constants\nconst TRAIN_TIMESTEPS = 1000;\nconst IMAGE_DIM = 256;\nconst IMAGE_CHANNELS = 3;\n\nnode.onStart = async () => {\n  framebuffer = new figment.Framebuffer(IMAGE_DIM, IMAGE_DIM);\n  calculateSchedules();\n  await loadUnetModel();\n};\n\nnode.onStop = async () => {\n  if (unetSession) await unetSession.release();\n  unetSession = null;\n  currentUnetPath = null;\n};\n\nasync function loadUnetModel() {\n  if (!unetFileIn.value || currentUnetPath === unetFileIn.value) return;\n  if (unetSession) await unetSession.release();\n  try {\n    ort.env.webgpu.powerPreference = 'high-performance';\n    unetSession = await ort.InferenceSession.create(figment.urlForAsset(unetFileIn.value), { executionProviders: ['webgpu'] });\n    currentUnetPath = unetFileIn.value;\n    console.log('UNet model loaded with WebGPU');\n  } catch (e) {\n    console.error('UNet Load Failed', e);\n    unetSession = null;\n    currentUnetPath = null;\n  }\n}\n\n// --- Cosine Beta Schedule (squaredcos_cap_v2) ---\nfunction calculateSchedules() {\n  _alphasCumprod = new Float32Array(TRAIN_TIMESTEPS);\n  const s = 0.008;\n  \n  for (let i = 0; i < TRAIN_TIMESTEPS; i++) {\n    const t1 = (i / TRAIN_TIMESTEPS + s) / (1 + s);\n    const t2 = ((i + 1) / TRAIN_TIMESTEPS + s) / (1 + s);\n    const alphaBarT = Math.cos(t1 * Math.PI / 2) ** 2;\n    const alphaBarT1 = Math.cos(t2 * Math.PI / 2) ** 2;\n    // We store alpha_cumprod at each step\n    // alpha_cumprod[0] uses f(1/T)/f(0), etc.\n    _alphasCumprod[i] = alphaBarT1 / (Math.cos(s / (1 + s) * Math.PI / 2) ** 2);\n  }\n  // Clamp: beta can't exceed 0.999\n  for (let i = TRAIN_TIMESTEPS - 1; i >= 1; i--) {\n    const beta = 1 - _alphasCumprod[i] / _alphasCumprod[i - 1];\n    if (beta > 0.999) {\n      _alphasCumprod[i] = _alphasCumprod[i - 1] * (1 - 0.999);\n    }\n  }\n}\n\n// --- Random Number Generator ---\nfunction sfc32(a, b, c, d) {\n  return function() {\n    a >>>= 0; b >>>= 0; c >>>= 0; d >>>= 0;\n    let t = (a + b) | 0;\n    a = b ^ (b >>> 9);\n    b = c + (c << 3);\n    c = (c << 21) | (c >>> 11);\n    d = (d + 1) | 0;\n    t = (t + d) | 0;\n    c = (c + t) | 0;\n    return (t >>> 0) / 4294967296;\n  };\n}\n\nfunction generateNoise(seed, size) {\n  const data = new Float32Array(size);\n  const rand = sfc32(seed, seed ^ 0xDEADBEEF, seed ^ 0xCAFEBABE, seed ^ 0xBAADF00D);\n  for (let i = 0; i < size; i++) {\n    const u = 1 - rand();\n    const v = rand();\n    data[i] = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);\n  }\n  return data;\n}\n\n// --- Read conditioning image pixels and normalize to [-1, 1] ---\nfunction readConditioningImage(condImage) {\n  const gl = window.gl;\n  const pixels = new Uint8Array(IMAGE_DIM * IMAGE_DIM * 4);\n  \n  // Read pixels from the conditioning image framebuffer\n  const tempFb = gl.createFramebuffer();\n  gl.bindFramebuffer(gl.FRAMEBUFFER, tempFb);\n  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, condImage.texture, 0);\n  gl.readPixels(0, 0, IMAGE_DIM, IMAGE_DIM, gl.RGBA, gl.UNSIGNED_BYTE, pixels);\n  gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n  gl.deleteFramebuffer(tempFb);\n  \n  // Convert to float32 CHW format normalized to [-1, 1]\n  const condData = new Float32Array(IMAGE_CHANNELS * IMAGE_DIM * IMAGE_DIM);\n  const pixelCount = IMAGE_DIM * IMAGE_DIM;\n  \n  for (let i = 0; i < pixelCount; i++) {\n    // WebGL readPixels gives bottom-to-top, flip vertically\n    const srcRow = IMAGE_DIM - 1 - Math.floor(i / IMAGE_DIM);\n    const srcCol = i % IMAGE_DIM;\n    const srcIdx = (srcRow * IMAGE_DIM + srcCol) * 4;\n    \n    condData[i] = pixels[srcIdx] / 255.0 * 2.0 - 1.0;                 // R\n    condData[i + pixelCount] = pixels[srcIdx + 1] / 255.0 * 2.0 - 1.0; // G\n    condData[i + pixelCount * 2] = pixels[srcIdx + 2] / 255.0 * 2.0 - 1.0; // B\n  }\n  \n  return condData;\n}\n\nnode.onRender = async () => {\n  if (isGenerating) return;\n  \n  const condImage = conditioningImageIn.value;\n  if (!condImage) return;\n\n  // Load UNet Model if file changed\n  await loadUnetModel();\n\n  if (!unetSession) return;\n\n  isGenerating = true;\n  const startTime = performance.now();\n  console.log(\"Starting Paired Diffusion Sampling...\");\n\n  try {\n    const steps = numStepsIn.value;\n    const stepRatio = Math.floor(TRAIN_TIMESTEPS / steps);\n    const timesteps = [];\n    \n    // Match diffusers \"leading\" timestep spacing: [950, 900, ..., 50, 0] for 20 steps\n    for (let i = 0; i < steps; i++) {\n      timesteps.push(i * stepRatio);\n    }\n    timesteps.reverse();\n\n    // Read the conditioning image\n    const condData = readConditioningImage(condImage);\n    const pixelCount = IMAGE_DIM * IMAGE_DIM;\n    const totalLatentSize = IMAGE_CHANNELS * pixelCount;\n\n    // 1. Start from pure noise\n    let sample = generateNoise(seedIn.value, totalLatentSize);\n\n    // 2. DDIM Denoising Loop\n    for (let i = 0; i < timesteps.length; i++) {\n      const t = timesteps[i];\n      const prevT = (i < timesteps.length - 1) ? timesteps[i + 1] : -1;\n\n      // Concatenate: [noisy_sample (3ch), conditioning (3ch)] = 6 channels\n      const modelInput = new Float32Array(6 * pixelCount);\n      modelInput.set(sample, 0);\n      modelInput.set(condData, totalLatentSize);\n\n      const inputTensor = new ort.Tensor('float32', modelInput, [1, 6, IMAGE_DIM, IMAGE_DIM]);\n      const tTensor = new ort.Tensor('int64', BigInt64Array.from([BigInt(t)]), [1]);\n      \n      const results = await unetSession.run({ sample: inputTensor, timestep: tTensor });\n      const noisePred = results.noise_pred.data;\n\n      // DDIM sampling\n      const alphaProdT = _alphasCumprod[t];\n      const alphaProdTPrev = (prevT >= 0) ? _alphasCumprod[prevT] : 1.0;\n      \n      const sqrtAlphaProdT = Math.sqrt(alphaProdT);\n      const sqrtBetaProdT = Math.sqrt(1 - alphaProdT);\n      const sqrtAlphaProdTPrev = Math.sqrt(alphaProdTPrev);\n      const sqrtBetaProdTPrev = Math.sqrt(1 - alphaProdTPrev);\n\n      for (let j = 0; j < sample.length; j++) {\n        // Predict x0\n        const predOriginalSample = (sample[j] - sqrtBetaProdT * noisePred[j]) / sqrtAlphaProdT;\n        // Clamp predicted x0 to [-1, 1] (clip_sample=true in scheduler config)\n        const clampedPred = Math.max(-1, Math.min(1, predOriginalSample));\n        // Compute x_{t-1}\n        sample[j] = sqrtAlphaProdTPrev * clampedPred + sqrtBetaProdTPrev * noisePred[j];\n      }\n    }\n\n    // 3. Convert to texture (no VAE needed, already in pixel space)\n    const textureData = new Uint8Array(pixelCount * 4);\n\n    for (let i = 0; i < pixelCount; i++) {\n      let r = sample[i];\n      let g = sample[i + pixelCount];\n      let b = sample[i + pixelCount * 2];\n\n      // Denormalize [-1, 1] -> [0, 255]\n      r = Math.min(255, Math.max(0, ((r + 1) / 2) * 255));\n      g = Math.min(255, Math.max(0, ((g + 1) / 2) * 255));\n      b = Math.min(255, Math.max(0, ((b + 1) / 2) * 255));\n\n      textureData[i * 4 + 0] = r;\n      textureData[i * 4 + 1] = g;\n      textureData[i * 4 + 2] = b;\n      textureData[i * 4 + 3] = 255;\n    }\n\n    framebuffer.bind();\n    const gl = window.gl;\n    gl.bindTexture(gl.TEXTURE_2D, framebuffer.texture);\n    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, IMAGE_DIM, IMAGE_DIM, 0, gl.RGBA, gl.UNSIGNED_BYTE, textureData);\n    gl.bindTexture(gl.TEXTURE_2D, null);\n    framebuffer.unbind();\n    \n    imageOut.set(framebuffer);\n\n    const duration = performance.now() - startTime;\n    console.log(`Generation Complete in ${duration.toFixed(2)}ms`);\n\n  } catch (err) {\n    console.error(\"Paired Diffusion Error:\", err);\n  } finally {\n    isGenerating = false;\n  }\n};",
+      "description": "Paired conditional diffusion with DDIM sampling"
+    }
+  ]
+}
