@@ -16,7 +16,7 @@ from diffusers import AutoencoderKL, DDIMScheduler, UNet2DModel
 from PIL import Image
 from torchvision import transforms
 
-VAE_MODEL_ID = "stabilityai/sd-vae-ft-msa"
+VAE_MODEL_ID = "stabilityai/sd-vae-ft-mse"
 VAE_SCALING_FACTOR = 0.18215
 
 

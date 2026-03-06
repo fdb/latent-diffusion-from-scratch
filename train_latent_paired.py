@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from tqdm.auto import tqdm
 
-VAE_MODEL_ID = "stabilityai/sd-vae-ft-msa"
+VAE_MODEL_ID = "stabilityai/sd-vae-ft-mse"
 VAE_SCALING_FACTOR = 0.18215
 
 

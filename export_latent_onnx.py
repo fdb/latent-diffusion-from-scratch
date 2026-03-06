@@ -16,7 +16,7 @@ import os
 import torch
 from diffusers import AutoencoderKL, UNet2DModel
 
-VAE_MODEL_ID = "stabilityai/sd-vae-ft-msa"
+VAE_MODEL_ID = "stabilityai/sd-vae-ft-mse"
 VAE_SCALING_FACTOR = 0.18215
 
 
