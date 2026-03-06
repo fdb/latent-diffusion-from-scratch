@@ -1,0 +1,103 @@
+{
+  "version": 5,
+  "nodes": [
+    {
+      "id": 1,
+      "name": "Out",
+      "type": "core.out",
+      "x": 383,
+      "y": 467
+    },
+    {
+      "id": 5,
+      "name": "LatentPairedDiffusion",
+      "type": "project.latentPairedDiffusion",
+      "x": 385,
+      "y": 367,
+      "values": {
+        "VAE Encoder Model": {
+          "type": "value",
+          "value": ""
+        },
+        "UNet Model": {
+          "type": "value",
+          "value": ""
+        },
+        "VAE Decoder Model": {
+          "type": "value",
+          "value": ""
+        },
+        "Seed": {
+          "type": "value",
+          "value": 44
+        },
+        "Steps": {
+          "type": "value",
+          "value": 20
+        }
+      }
+    },
+    {
+      "id": 9,
+      "name": "Resize",
+      "type": "image.resize",
+      "x": 382,
+      "y": 268,
+      "values": {
+        "width": {
+          "type": "value",
+          "value": 256
+        },
+        "height": {
+          "type": "value",
+          "value": 256
+        }
+      }
+    },
+    {
+      "id": 10,
+      "name": "Load Image",
+      "type": "image.loadImage",
+      "x": 385,
+      "y": 174,
+      "values": {
+        "file": {
+          "type": "value",
+          "value": "media/example-pose.png"
+        }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "outNode": 5,
+      "outPort": "Generated Image",
+      "inNode": 1,
+      "inPort": "in"
+    },
+    {
+      "outNode": 9,
+      "outPort": "out",
+      "inNode": 5,
+      "inPort": "Conditioning Image"
+    },
+    {
+      "outNode": 10,
+      "outPort": "out",
+      "inNode": 9,
+      "inPort": "in"
+    }
+  ],
+  "settings": {
+    "oscEnabled": false,
+    "oscPort": 8000
+  },
+  "types": [
+    {
+      "name": "LatentPairedDiffusion",
+      "type": "project.latentPairedDiffusion",
+      "source": "/**\n * @name Latent Paired Diffusion (DDIM)\n * @description Latent-space conditional diffusion with VAE encode/decode and GPU-accelerated DDIM sampling.\n * @category ml\n */\n\nconst encoderFileIn = node.fileIn('VAE Encoder Model', '');\nconst unetFileIn = node.fileIn('UNet Model', '');\nconst decoderFileIn = node.fileIn('VAE Decoder Model', '');\nconst seedIn = node.numberIn('Seed', 42, { min: 1, max: 1000000, step: 1 });\nconst numStepsIn = node.numberIn('Steps', 20, { min: 1, max: 1000, step: 1 });\nconst conditioningImageIn = node.imageIn('Conditioning Image');\nconst imageOut = node.imageOut('Generated Image');\n\nlet encoderSession, unetSession, decoderSession;\nlet currentEncoderPath, currentUnetPath, currentDecoderPath;\nlet isGenerating = false;\nlet framebuffer;\nlet _alphasCumprod;\n\n// WebGPU compute state\nlet gpuDevice;\nlet condPixelBuffer, condLatentBuffer, sampleBuffer, modelInputBuffer, paramsBuffer, noisePredBuffer, decodedPixelBuffer;\nlet concatPipeline, concatBindGroup;\nlet ddimPipeline, ddimBindGroup;\nlet condPixelTensor, condLatentTensor;\nlet unetInputTensor, noisePredTensor;\nlet sampleTensor, decodedPixelTensor;\n\nconst TRAIN_TIMESTEPS = 1000;\nconst IMAGE_DIM = 256;\nconst LATENT_DIM = 32;\nconst PIXEL_COUNT = IMAGE_DIM * IMAGE_DIM;\nconst LATENT_PIXEL_COUNT = LATENT_DIM * LATENT_DIM;\nconst LATENT_FLOATS = 4 * LATENT_PIXEL_COUNT;\nconst LATENT_INPUT_FLOATS = 8 * LATENT_PIXEL_COUNT;\nconst PIXEL_FLOATS = 3 * PIXEL_COUNT;\nconst WG_SIZE = 256;\n\nnode.onStart = async () => {\n  framebuffer = new figment.Framebuffer(IMAGE_DIM, IMAGE_DIM);\n  calculateSchedules();\n  await loadModels();\n};\n\nnode.onStop = async () => {\n  if (encoderSession) await encoderSession.release();\n  if (unetSession) await unetSession.release();\n  if (decoderSession) await decoderSession.release();\n  encoderSession = null;\n  unetSession = null;\n  decoderSession = null;\n  currentEncoderPath = null;\n  currentUnetPath = null;\n  currentDecoderPath = null;\n  if (condPixelBuffer) condPixelBuffer.destroy();\n  if (condLatentBuffer) condLatentBuffer.destroy();\n  if (sampleBuffer) sampleBuffer.destroy();\n  if (modelInputBuffer) modelInputBuffer.destroy();\n  if (paramsBuffer) paramsBuffer.destroy();\n  if (noisePredBuffer) noisePredBuffer.destroy();\n  if (decodedPixelBuffer) decodedPixelBuffer.destroy();\n};\n\nasync function loadModels() {\n  const encPath = encoderFileIn.value;\n  const unetPath = unetFileIn.value;\n  const decPath = decoderFileIn.value;\n  if (!encPath || !unetPath || !decPath) return;\n\n  const needsEncoder = currentEncoderPath !== encPath;\n  const needsUnet = currentUnetPath !== unetPath;\n  const needsDecoder = currentDecoderPath !== decPath;\n  if (!needsEncoder && !needsUnet && !needsDecoder) return;\n\n  // If we need to reinitialize any session and don't have a device yet,\n  // or if all sessions need loading, do a full setup\n  const needsFullSetup = !gpuDevice || (needsEncoder && needsUnet && needsDecoder);\n\n  try {\n    ort.env.webgpu.powerPreference = 'high-performance';\n\n    if (needsEncoder) {\n      if (encoderSession) await encoderSession.release();\n      encoderSession = await ort.InferenceSession.create(figment.urlForAsset(encPath), {\n        executionProviders: ['webgpu'],\n      });\n      currentEncoderPath = encPath;\n    }\n\n    if (needsUnet) {\n      if (unetSession) await unetSession.release();\n      unetSession = await ort.InferenceSession.create(figment.urlForAsset(unetPath), {\n        executionProviders: ['webgpu'],\n      });\n      currentUnetPath = unetPath;\n    }\n\n    if (needsDecoder) {\n      if (decoderSession) await decoderSession.release();\n      decoderSession = await ort.InferenceSession.create(figment.urlForAsset(decPath), {\n        executionProviders: ['webgpu'],\n      });\n      currentDecoderPath = decPath;\n    }\n\n    if (needsFullSetup) {\n      // Get the device from ORT\n      gpuDevice = ort.env.webgpu.device;\n\n      // Clean up old buffers if any\n      if (condPixelBuffer) condPixelBuffer.destroy();\n      if (condLatentBuffer) condLatentBuffer.destroy();\n      if (sampleBuffer) sampleBuffer.destroy();\n      if (modelInputBuffer) modelInputBuffer.destroy();\n      if (paramsBuffer) paramsBuffer.destroy();\n      if (noisePredBuffer) noisePredBuffer.destroy();\n      if (decodedPixelBuffer) decodedPixelBuffer.destroy();\n\n      const BUF = GPUBufferUsage;\n\n      condPixelBuffer = gpuDevice.createBuffer({\n        size: PIXEL_FLOATS * 4,\n        usage: BUF.STORAGE | BUF.COPY_DST,\n      });\n      condLatentBuffer = gpuDevice.createBuffer({\n        size: LATENT_FLOATS * 4,\n        usage: BUF.STORAGE | BUF.COPY_DST | BUF.COPY_SRC,\n      });\n      sampleBuffer = gpuDevice.createBuffer({\n        size: LATENT_FLOATS * 4,\n        usage: BUF.STORAGE | BUF.COPY_DST | BUF.COPY_SRC,\n      });\n      modelInputBuffer = gpuDevice.createBuffer({\n        size: LATENT_INPUT_FLOATS * 4,\n        usage: BUF.STORAGE | BUF.COPY_DST,\n      });\n      paramsBuffer = gpuDevice.createBuffer({\n        size: 16,\n        usage: BUF.UNIFORM | BUF.COPY_DST,\n      });\n      noisePredBuffer = gpuDevice.createBuffer({\n        size: LATENT_FLOATS * 4,\n        usage: BUF.STORAGE | BUF.COPY_SRC,\n      });\n      decodedPixelBuffer = gpuDevice.createBuffer({\n        size: PIXEL_FLOATS * 4,\n        usage: BUF.STORAGE | BUF.COPY_SRC,\n      });\n\n      // Pre-bind ORT tensors to GPU buffers\n      condPixelTensor = ort.Tensor.fromGpuBuffer(condPixelBuffer, {\n        dataType: 'float32', dims: [1, 3, IMAGE_DIM, IMAGE_DIM],\n      });\n      condLatentTensor = ort.Tensor.fromGpuBuffer(condLatentBuffer, {\n        dataType: 'float32', dims: [1, 4, LATENT_DIM, LATENT_DIM],\n      });\n      unetInputTensor = ort.Tensor.fromGpuBuffer(modelInputBuffer, {\n        dataType: 'float32', dims: [1, 8, LATENT_DIM, LATENT_DIM],\n      });\n      noisePredTensor = ort.Tensor.fromGpuBuffer(noisePredBuffer, {\n        dataType: 'float32', dims: [1, 4, LATENT_DIM, LATENT_DIM],\n      });\n      sampleTensor = ort.Tensor.fromGpuBuffer(sampleBuffer, {\n        dataType: 'float32', dims: [1, 4, LATENT_DIM, LATENT_DIM],\n      });\n      decodedPixelTensor = ort.Tensor.fromGpuBuffer(decodedPixelBuffer, {\n        dataType: 'float32', dims: [1, 3, IMAGE_DIM, IMAGE_DIM],\n      });\n\n      // Concat shader: [sample(4ch), condLatent(4ch)] -> 8-channel model input\n      const concatModule = gpuDevice.createShaderModule({ code: `\n        @group(0) @binding(0) var<storage, read> sample: array<f32>;\n        @group(0) @binding(1) var<storage, read> cond: array<f32>;\n        @group(0) @binding(2) var<storage, read_write> out: array<f32>;\n        @compute @workgroup_size(${WG_SIZE})\n        fn main(@builtin(global_invocation_id) id: vec3u) {\n          let i = id.x;\n          if (i < ${LATENT_FLOATS}u) {\n            out[i] = sample[i];\n            out[i + ${LATENT_FLOATS}u] = cond[i];\n          }\n        }\n      `});\n      concatPipeline = gpuDevice.createComputePipeline({\n        layout: 'auto',\n        compute: { module: concatModule, entryPoint: 'main' },\n      });\n      concatBindGroup = gpuDevice.createBindGroup({\n        layout: concatPipeline.getBindGroupLayout(0),\n        entries: [\n          { binding: 0, resource: { buffer: sampleBuffer } },\n          { binding: 1, resource: { buffer: condLatentBuffer } },\n          { binding: 2, resource: { buffer: modelInputBuffer } },\n        ],\n      });\n\n      // DDIM step shader: update sample in-place using noise prediction\n      const ddimModule = gpuDevice.createShaderModule({ code: `\n        struct P { sa: f32, sb: f32, sap: f32, sbp: f32 };\n        @group(0) @binding(0) var<storage, read_write> sample: array<f32>;\n        @group(0) @binding(1) var<storage, read> noise: array<f32>;\n        @group(0) @binding(2) var<uniform> p: P;\n        @compute @workgroup_size(${WG_SIZE})\n        fn main(@builtin(global_invocation_id) id: vec3u) {\n          let i = id.x;\n          if (i < ${LATENT_FLOATS}u) {\n            let pred_x0 = clamp((sample[i] - p.sb * noise[i]) / p.sa, -1.0, 1.0);\n            sample[i] = p.sap * pred_x0 + p.sbp * noise[i];\n          }\n        }\n      `});\n      ddimPipeline = gpuDevice.createComputePipeline({\n        layout: 'auto',\n        compute: { module: ddimModule, entryPoint: 'main' },\n      });\n      ddimBindGroup = gpuDevice.createBindGroup({\n        layout: ddimPipeline.getBindGroupLayout(0),\n        entries: [\n          { binding: 0, resource: { buffer: sampleBuffer } },\n          { binding: 1, resource: { buffer: noisePredBuffer } },\n          { binding: 2, resource: { buffer: paramsBuffer } },\n        ],\n      });\n\n      console.log('All models loaded with GPU compute pipelines');\n    }\n  } catch (e) {\n    console.error('Model Load Failed', e);\n  }\n}\n\nfunction calculateSchedules() {\n  _alphasCumprod = new Float32Array(TRAIN_TIMESTEPS);\n  const s = 0.008;\n  const f0 = Math.cos(s / (1 + s) * Math.PI / 2) ** 2;\n  for (let i = 0; i < TRAIN_TIMESTEPS; i++) {\n    const t2 = ((i + 1) / TRAIN_TIMESTEPS + s) / (1 + s);\n    _alphasCumprod[i] = Math.cos(t2 * Math.PI / 2) ** 2 / f0;\n  }\n  for (let i = TRAIN_TIMESTEPS - 1; i >= 1; i--) {\n    const beta = 1 - _alphasCumprod[i] / _alphasCumprod[i - 1];\n    if (beta > 0.999) _alphasCumprod[i] = _alphasCumprod[i - 1] * 0.001;\n  }\n}\n\nfunction sfc32(a, b, c, d) {\n  return function() {\n    a >>>= 0; b >>>= 0; c >>>= 0; d >>>= 0;\n    let t = (a + b) | 0;\n    a = b ^ (b >>> 9);\n    b = c + (c << 3);\n    c = (c << 21) | (c >>> 11);\n    d = (d + 1) | 0;\n    t = (t + d) | 0;\n    c = (c + t) | 0;\n    return (t >>> 0) / 4294967296;\n  };\n}\n\nfunction generateNoise(seed, size) {\n  const data = new Float32Array(size);\n  const rand = sfc32(seed, seed ^ 0xDEADBEEF, seed ^ 0xCAFEBABE, seed ^ 0xBAADF00D);\n  for (let i = 0; i < size; i++) {\n    const u = 1 - rand();\n    const v = rand();\n    data[i] = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);\n  }\n  return data;\n}\n\nfunction readConditioningImage(condImage) {\n  const gl = window.gl;\n  const pixels = new Uint8Array(PIXEL_COUNT * 4);\n  const tempFb = gl.createFramebuffer();\n  gl.bindFramebuffer(gl.FRAMEBUFFER, tempFb);\n  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, condImage.texture, 0);\n  gl.readPixels(0, 0, IMAGE_DIM, IMAGE_DIM, gl.RGBA, gl.UNSIGNED_BYTE, pixels);\n  gl.bindFramebuffer(gl.FRAMEBUFFER, null);\n  gl.deleteFramebuffer(tempFb);\n\n  const condData = new Float32Array(PIXEL_FLOATS);\n  for (let i = 0; i < PIXEL_COUNT; i++) {\n    const srcRow = IMAGE_DIM - 1 - Math.floor(i / IMAGE_DIM);\n    const srcCol = i % IMAGE_DIM;\n    const srcIdx = (srcRow * IMAGE_DIM + srcCol) * 4;\n    condData[i] = pixels[srcIdx] / 255.0 * 2.0 - 1.0;\n    condData[i + PIXEL_COUNT] = pixels[srcIdx + 1] / 255.0 * 2.0 - 1.0;\n    condData[i + PIXEL_COUNT * 2] = pixels[srcIdx + 2] / 255.0 * 2.0 - 1.0;\n  }\n  return condData;\n}\n\nnode.onRender = async () => {\n  if (isGenerating) return;\n  const condImage = conditioningImageIn.value;\n  if (!condImage || !gpuDevice) return;\n  await loadModels();\n  if (!encoderSession || !unetSession || !decoderSession) return;\n\n  isGenerating = true;\n  const startTime = performance.now();\n  console.log('Starting latent-space GPU-accelerated diffusion...');\n\n  try {\n    const steps = numStepsIn.value;\n    const stepRatio = Math.floor(TRAIN_TIMESTEPS / steps);\n    const timesteps = [];\n    for (let i = 0; i < steps; i++) timesteps.push(i * stepRatio);\n    timesteps.reverse();\n\n    // 1. Read conditioning pixels from GL texture\n    const condData = readConditioningImage(condImage);\n    gpuDevice.queue.writeBuffer(condPixelBuffer, 0, condData);\n\n    // 2. VAE encode: conditioning pixels -> conditioning latent\n    await encoderSession.run({ x: condPixelTensor }, { latent: condLatentTensor });\n\n    // 3. Upload initial noise to sample buffer [1,4,32,32]\n    const noise = generateNoise(seedIn.value, LATENT_FLOATS);\n    gpuDevice.queue.writeBuffer(sampleBuffer, 0, noise);\n\n    const numWorkgroups = Math.ceil(LATENT_FLOATS / WG_SIZE);\n\n    // 4. DDIM loop -- everything stays on GPU\n    for (let i = 0; i < timesteps.length; i++) {\n      const t = timesteps[i];\n      const prevT = (i < timesteps.length - 1) ? timesteps[i + 1] : -1;\n\n      // 4a. GPU compute: concat sample + condLatent -> modelInput [1,8,32,32]\n      const enc1 = gpuDevice.createCommandEncoder();\n      const pass1 = enc1.beginComputePass();\n      pass1.setPipeline(concatPipeline);\n      pass1.setBindGroup(0, concatBindGroup);\n      pass1.dispatchWorkgroups(numWorkgroups);\n      pass1.end();\n      gpuDevice.queue.submit([enc1.finish()]);\n\n      // 4b. UNet inference with pre-bound GPU buffers\n      const tTensor = new ort.Tensor('int64', BigInt64Array.from([BigInt(t)]), [1]);\n      await unetSession.run({ sample: unetInputTensor, timestep: tTensor }, { noise_pred: noisePredTensor });\n\n      // 4c. GPU compute: DDIM step (updates sampleBuffer in-place)\n      const aT = _alphasCumprod[t];\n      const aP = (prevT >= 0) ? _alphasCumprod[prevT] : 1.0;\n      gpuDevice.queue.writeBuffer(paramsBuffer, 0, new Float32Array([\n        Math.sqrt(aT), Math.sqrt(1 - aT), Math.sqrt(aP), Math.sqrt(1 - aP),\n      ]));\n\n      const enc2 = gpuDevice.createCommandEncoder();\n      const pass2 = enc2.beginComputePass();\n      pass2.setPipeline(ddimPipeline);\n      pass2.setBindGroup(0, ddimBindGroup);\n      pass2.dispatchWorkgroups(numWorkgroups);\n      pass2.end();\n      gpuDevice.queue.submit([enc2.finish()]);\n    }\n\n    // 5. VAE decode: sample latent -> decoded pixels\n    await decoderSession.run({ z: sampleTensor }, { decoded: decodedPixelTensor });\n\n    // 6. Single GPU->CPU readback of decoded pixels\n    const readBuf = gpuDevice.createBuffer({\n      size: PIXEL_FLOATS * 4,\n      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,\n    });\n    const enc3 = gpuDevice.createCommandEncoder();\n    enc3.copyBufferToBuffer(decodedPixelBuffer, 0, readBuf, 0, PIXEL_FLOATS * 4);\n    gpuDevice.queue.submit([enc3.finish()]);\n    await readBuf.mapAsync(GPUMapMode.READ);\n    const decoded = new Float32Array(readBuf.getMappedRange().slice(0));\n    readBuf.unmap();\n    readBuf.destroy();\n\n    // 7. Convert to texture\n    const textureData = new Uint8Array(PIXEL_COUNT * 4);\n    for (let i = 0; i < PIXEL_COUNT; i++) {\n      textureData[i * 4]     = Math.min(255, Math.max(0, ((decoded[i] + 1) / 2) * 255));\n      textureData[i * 4 + 1] = Math.min(255, Math.max(0, ((decoded[i + PIXEL_COUNT] + 1) / 2) * 255));\n      textureData[i * 4 + 2] = Math.min(255, Math.max(0, ((decoded[i + PIXEL_COUNT * 2] + 1) / 2) * 255));\n      textureData[i * 4 + 3] = 255;\n    }\n\n    framebuffer.bind();\n    const gl = window.gl;\n    gl.bindTexture(gl.TEXTURE_2D, framebuffer.texture);\n    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, IMAGE_DIM, IMAGE_DIM, 0, gl.RGBA, gl.UNSIGNED_BYTE, textureData);\n    gl.bindTexture(gl.TEXTURE_2D, null);\n    framebuffer.unbind();\n\n    imageOut.set(framebuffer);\n    console.log(`Done in ${(performance.now() - startTime).toFixed(0)}ms`);\n  } catch (err) {\n    console.error('Diffusion Error:', err);\n  } finally {\n    isGenerating = false;\n  }\n};\n",
+      "description": "Latent-space paired conditional diffusion with DDIM sampling"
+    }
+  ]
+}
