@@ -1,0 +1,57 @@
+{
+  "version": 5,
+  "nodes": [
+    {
+      "id": 6,
+      "name": "Out",
+      "type": "core.out",
+      "x": 37.91838513540547,
+      "y": 248.37720067349582
+    },
+    {
+      "id": 7,
+      "name": "LatentDiffusion",
+      "type": "project.latentDiffusion",
+      "x": 27.031128238943023,
+      "y": 178.71778812020256,
+      "values": {
+        "UNet Model": {
+          "type": "value",
+          "value": "snapshots/model_epoch_70.onnx"
+        },
+        "VAE Decoder": {
+          "type": "value",
+          "value": "snapshots/vae_decoder.onnx"
+        },
+        "Seed": {
+          "type": "value",
+          "value": 15
+        },
+        "Steps": {
+          "type": "value",
+          "value": 5
+        }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "outNode": 7,
+      "outPort": "Generated Image",
+      "inNode": 6,
+      "inPort": "in"
+    }
+  ],
+  "settings": {
+    "oscEnabled": false,
+    "oscPort": 8000
+  },
+  "types": [
+    {
+      "name": "LatentDiffusion",
+      "type": "project.latentDiffusion",
+      "source": "/**\n * @name Diffusion Sampler (DDIM)\n * @description Latent diffusion with DDIM sampling (supports low step counts).\n * @category ml\n */\n\nconst unetFileIn = node.fileIn('UNet Model', '');\nconst vaeFileIn = node.fileIn('VAE Decoder', '');\nconst seedIn = node.numberIn('Seed', 42, { min: 1, max: 1000000, step: 1 });\nconst numStepsIn = node.numberIn('Steps', 50, { min: 1, max: 1000, step: 1 });\nconst imageOut = node.imageOut('Generated Image');\n\n// Internal state\nlet unetSession, vaeSession;\nlet currentUnetPath, currentVaePath;\nlet isGenerating = false;\nlet framebuffer;\nlet _alphasCumprod; // We only need cumprod for DDIM\n\n// Constants\nconst TRAIN_TIMESTEPS = 1000;\nconst LATENT_DIM = 64;\nconst LATENT_CHANNELS = 4;\nconst IMAGE_DIM = 512;\n\nnode.onStart = async () => {\n  framebuffer = new figment.Framebuffer(IMAGE_DIM, IMAGE_DIM);\n  calculateSchedules();\n};\n\nnode.onStop = async () => {\n  if (unetSession) await unetSession.release();\n  if (vaeSession) await vaeSession.release();\n};\n\n// --- Precompute Alpha Cumulative Products ---\nfunction calculateSchedules() {\n  _alphasCumprod = new Float32Array(TRAIN_TIMESTEPS);\n  let cumprod = 1.0;\n  const start = 0.0001;\n  const end = 0.02;\n  \n  for (let i = 0; i < TRAIN_TIMESTEPS; i++) {\n    // Linear beta schedule (standard for SD)\n    const beta = start + (end - start) * (i / (TRAIN_TIMESTEPS - 1));\n    cumprod *= (1.0 - beta);\n    _alphasCumprod[i] = cumprod;\n  }\n}\n\n// --- Random Number Generator ---\nfunction sfc32(a, b, c, d) {\n  return function() {\n    a >>>= 0; b >>>= 0; c >>>= 0; d >>>= 0;\n    let t = (a + b) | 0;\n    a = b ^ (b >>> 9);\n    b = c + (c << 3);\n    c = (c << 21) | (c >>> 11);\n    d = (d + 1) | 0;\n    t = (t + d) | 0;\n    c = (c + t) | 0;\n    return (t >>> 0) / 4294967296;\n  };\n}\n\nfunction generateNoise(seed, size) {\n  const data = new Float32Array(size);\n  const rand = sfc32(seed, seed ^ 0xDEADBEEF, seed ^ 0xCAFEBABE, seed ^ 0xBAADF00D);\n  for (let i = 0; i < size; i++) {\n    const u = 1 - rand();\n    const v = rand();\n    data[i] = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);\n  }\n  return data;\n}\n\nnode.onRender = async () => {\n  if (isGenerating) return;\n\n  // Load Models\n  if (currentUnetPath !== unetFileIn.value) {\n    if (unetSession) await unetSession.release();\n    try {\n      // Use WebGPU for UNet\n      unetSession = await ort.InferenceSession.create(figment.urlForAsset(unetFileIn.value), { executionProviders: ['webgpu', 'wasm'] });\n      currentUnetPath = unetFileIn.value;\n    } catch (e) { console.error(\"UNet Load Failed\", e); return; }\n  }\n\n  if (currentVaePath !== vaeFileIn.value) {\n    if (vaeSession) await vaeSession.release();\n    try {\n      // Use WebGPU for VAE\n      vaeSession = await ort.InferenceSession.create(figment.urlForAsset(vaeFileIn.value), { executionProviders: ['webgpu', 'wasm'] });\n      currentVaePath = vaeFileIn.value;\n    } catch (e) { console.error(\"VAE Load Failed\", e); return; }\n  }\n\n  if (!unetSession || !vaeSession) return;\n  if (node._lastSeed === seedIn.value && node._lastSteps === numStepsIn.value && node._hasGenerated) return;\n\n  isGenerating = true;\n  \n  // --- Performance Start ---\n  const startTime = performance.now();\n  console.log(\"🎨 Starting Diffusion Sampling...\");\n\n  try {\n    const steps = numStepsIn.value;\n    const stepRatio = TRAIN_TIMESTEPS / steps;\n    const timesteps = [];\n    \n    // Generate timesteps (e.g., 999, 979, ... 19)\n    for (let i = 0; i < steps; i++) {\n      timesteps.push(Math.floor(TRAIN_TIMESTEPS - 1 - i * stepRatio));\n    }\n\n    // 1. Initial Noise\n    let latents = generateNoise(seedIn.value, 1 * LATENT_CHANNELS * LATENT_DIM * LATENT_DIM);\n\n    // 2. Denoising Loop (DDIM)\n    for (let i = 0; i < timesteps.length; i++) {\n      const t = timesteps[i];\n      // Determine the next timestep (t_prev)\n      const prevT = (i < timesteps.length - 1) ? timesteps[i+1] : -1;\n\n      // Run UNet\n      const latentTensor = new ort.Tensor('float32', latents, [1, 4, 64, 64]);\n      // Note: ONNX Runtime expects Int64 for timestep\n      const tTensor = new ort.Tensor('int64', BigInt64Array.from([BigInt(t)]), [1]);\n      \n      const results = await unetSession.run({ sample: latentTensor, timestep: tTensor });\n      const noisePred = results.noise_pred.data;\n\n      // --- DDIM SAMPLING MATH ---\n      // Get alpha_cumprod for current step (t) and next step (prevT)\n      const alphaProdT = _alphasCumprod[t];\n      const alphaProdTPrev = (prevT >= 0) ? _alphasCumprod[prevT] : 1.0;\n      \n      const betaProdT = 1 - alphaProdT;\n      const betaProdTPrev = 1 - alphaProdTPrev;\n\n      // 1. Predict Original Sample (x0) from current noise prediction\n      // formula: (x_t - sqrt(1-alpha_t) * noise) / sqrt(alpha_t)\n      const sqrtAlphaProdT = Math.sqrt(alphaProdT);\n      const sqrtBetaProdT = Math.sqrt(betaProdT);\n      \n      // 2. Predict Direction to x_prev\n      const sqrtBetaProdTPrev = Math.sqrt(betaProdTPrev);\n      const sqrtAlphaProdTPrev = Math.sqrt(alphaProdTPrev);\n\n      for (let j = 0; j < latents.length; j++) {\n        const predOriginalSample = (latents[j] - sqrtBetaProdT * noisePred[j]) / sqrtAlphaProdT;\n        \n        // 3. Compute x_prev (Deterministic DDIM Step)\n        // formula: sqrt(alpha_t_prev) * pred_x0 + sqrt(1-alpha_t_prev) * noise_pred\n        latents[j] = (sqrtAlphaProdTPrev * predOriginalSample) + (sqrtBetaProdTPrev * noisePred[j]);\n      }\n    }\n\n    // 3. Scale Latents for VAE\n    for (let j = 0; j < latents.length; j++) {\n      latents[j] = latents[j] * (1.0 / 0.18215);\n    }\n\n    // 4. Decode with VAE\n    const vaeInput = new ort.Tensor('float32', latents, [1, 4, 64, 64]);\n    const vaeResults = await vaeSession.run({ \"latent_sample\": vaeInput });\n    const decodedKey = Object.keys(vaeResults)[0]; \n    const decoded = vaeResults[decodedKey].data;\n\n    // 5. Convert to Texture\n    const pixelCount = IMAGE_DIM * IMAGE_DIM;\n    const textureData = new Uint8Array(pixelCount * 4);\n\n    for (let i = 0; i < pixelCount; i++) {\n      let r = decoded[i];\n      let g = decoded[i + pixelCount];\n      let b = decoded[i + pixelCount * 2];\n\n      // Normalize [-1, 1] -> [0, 255]\n      r = Math.min(255, Math.max(0, ((r / 2) + 0.5) * 255));\n      g = Math.min(255, Math.max(0, ((g / 2) + 0.5) * 255));\n      b = Math.min(255, Math.max(0, ((b / 2) + 0.5) * 255));\n\n      textureData[i * 4 + 0] = r;\n      textureData[i * 4 + 1] = g;\n      textureData[i * 4 + 2] = b;\n      textureData[i * 4 + 3] = 255; \n    }\n\n    framebuffer.bind();\n    const gl = window.gl;\n    gl.bindTexture(gl.TEXTURE_2D, framebuffer.texture);\n    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, IMAGE_DIM, IMAGE_DIM, 0, gl.RGBA, gl.UNSIGNED_BYTE, textureData);\n    gl.bindTexture(gl.TEXTURE_2D, null);\n    framebuffer.unbind();\n    \n    imageOut.set(framebuffer);\n    \n    node._lastSeed = seedIn.value;\n    node._lastSteps = numStepsIn.value;\n    node._hasGenerated = true;\n\n    // --- Performance End ---\n    const duration = performance.now() - startTime;\n    console.log(`✅ Generation Complete in ${duration.toFixed(2)}ms`);\n\n  } catch (err) {\n    console.error(\"Diffusion Error:\", err);\n  } finally {\n    isGenerating = false;\n  }\n};",
+      "description": "Internal state"
+    }
+  ]
+}
