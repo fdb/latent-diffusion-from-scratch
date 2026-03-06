@@ -139,7 +139,7 @@ def train_paired_diffusion(
     base_output_dir="output",
     resume_from=None,
     image_size=256,
-    train_batch_size=8,
+    train_batch_size=4,
     num_epochs=100,
     gradient_accumulation_steps=4,
     learning_rate=1e-5,
